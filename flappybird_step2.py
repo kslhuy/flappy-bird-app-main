@@ -2,20 +2,16 @@ import pygame
 import random
 from ai_controllers import create_controller
 from ai_utils import GameStateManager, ImitationLogger, AIConfig, load_residual_model
-from gui_controls import ControlPanel
 
 # Initialize Pygame and mixer
 pygame.init()
 pygame.mixer.init()
 
 # Screen dimensions
-GAME_WIDTH = 400
-GAME_HEIGHT = 600
-GUI_WIDTH = 320
-SCREEN_WIDTH = GAME_WIDTH + GUI_WIDTH
-SCREEN_HEIGHT = GAME_HEIGHT
+SCREEN_WIDTH = 400
+SCREEN_HEIGHT = 600
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("Flappy Bird with AI Controls")
+pygame.display.set_caption("Flappy Bird")
 
 # Colors
 WHITE = (255, 255, 255)
@@ -72,10 +68,10 @@ background = load_sprite_from_sheet(
     sprite_sheet, BACKGROUND_X, BACKGROUND_Y, BACKGROUND_WIDTH, BACKGROUND_HEIGHT)
 if background:
     background = pygame.transform.scale(
-        background, (GAME_WIDTH, GAME_HEIGHT))
+        background, (SCREEN_WIDTH, SCREEN_HEIGHT))
 else:
     print("Background failed to load, using fallback")
-    background = pygame.Surface((GAME_WIDTH, GAME_HEIGHT))
+    background = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
     background.fill(SKY_BLUE)
 
 # Load bird frames
@@ -99,8 +95,8 @@ if not pipe_base_img:
     pipe_base_img.fill((0, 255, 0))
 
 # Bird properties
-bird_x = GAME_WIDTH // 4
-bird_y = GAME_HEIGHT // 2
+bird_x = SCREEN_WIDTH // 4
+bird_y = SCREEN_HEIGHT // 2
 bird_velocity = 0
 GRAVITY = 0.5
 FLAP_POWER = -10
@@ -110,8 +106,8 @@ bird_animation_counter = 0
 
 # Pipe properties
 PIPE_GAP = 150
-pipe_x = GAME_WIDTH
-pipe_height = random.randint(100, GAME_HEIGHT - PIPE_GAP - 100)
+pipe_x = SCREEN_WIDTH
+pipe_height = random.randint(100, SCREEN_HEIGHT - PIPE_GAP - 100)
 pipe_speed = 3
 pipe_passed = False
 
@@ -127,47 +123,176 @@ PLAYING = 1
 GAME_OVER = 2
 game_state = IDLE
 
-# -------------------- AI System Setup --------------------
-ai_config = AIConfig()
-state_manager = GameStateManager()
-logger = ImitationLogger(ai_config.log_path, ai_config.data_log)
-residual_model = load_residual_model(ai_config.residual_model_path)
+# -------------------- AI / Automation Config --------------------
+USE_AI = True            # Master switch (set False for manual play)
+AI_MODE = 'heuristic'    # 'heuristic' | 'pid' | 'plan'
+DATA_LOG = True          # Log (state, action) for imitation learning
+LOG_PATH = 'imitation_data.csv'
+PLAN_HORIZON = 40        # Frames to simulate in planner
+PLAN_FLAP_FRAMES = 12    # Frames of upward influence after a flap (approx)
+GRAVITY_SIM = GRAVITY
+FLAP_POWER_SIM = FLAP_POWER
 
-# Initialize AI controllers
-controllers = {
-    'heuristic': create_controller('heuristic', residual_model=residual_model),
-    'pid': create_controller('pid', **ai_config.pid_params),
-    'plan': create_controller('plan', **ai_config.planner_params, gravity=GRAVITY, flap_power=FLAP_POWER)
-}
+# PID parameters (tune as needed)
+PID_KP = 0.12
+PID_KI = 0.0008
+PID_KD = 0.45
+PID_MAX_I = 300
+pid_integral = 0.0
+pid_last_error = 0.0
 
-# Initialize GUI Control Panel (positioned on the right side)
-control_panel = ControlPanel(
-    x=GAME_WIDTH + 10, y=10, width=GUI_WIDTH - 20, height=GAME_HEIGHT - 20,
-    controllers=controllers, ai_config=ai_config
-)
+# Residual model (optional) adjusts heuristic threshold; tiny MLP placeholder
+class ResidualNet(nn.Module if torch else object):
+    def __init__(self):
+        if not torch:
+            return
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(5, 32), nn.ReLU(),
+            nn.Linear(32, 16), nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+residual_model = None
+if torch and os.path.isfile('residual_model.pth'):
+    try:
+        residual_model = ResidualNet()
+        residual_model.load_state_dict(torch.load('residual_model.pth', map_location='cpu'))
+        residual_model.eval()
+        print('Residual model loaded.')
+    except Exception as e:
+        print(f'Failed to load residual model: {e}')
+        residual_model = None
+
+# Rolling buffer for planner / optional smoothing
+action_history = deque(maxlen=10)
+
+# Logging setup
+if DATA_LOG:
+    if not os.path.isfile(LOG_PATH):
+        with open(LOG_PATH, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['bird_y', 'bird_velocity', 'gap_top', 'gap_bottom', 'pipe_dx', 'action'])
+
+
+def log_sample(state, action):
+    if not DATA_LOG:
+        return
+    with open(LOG_PATH, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            int(state['bird_y']), round(state['bird_velocity'], 3),
+            int(state['gap_top']), int(state['gap_bottom']), int(state['pipe_dx']), int(action)
+        ])
+
+
+def get_state():
+    gap_top_local = pipe_height
+    gap_bottom_local = pipe_height + PIPE_GAP
+    state = {
+        'bird_y': bird_y,
+        'bird_velocity': bird_velocity,
+        'gap_top': gap_top_local,
+        'gap_bottom': gap_bottom_local,
+        'pipe_dx': pipe_x - bird_x
+    }
+    return state
+
+
+def heuristic_controller(state):
+    # Aim for center of gap
+    gap_center = (state['gap_top'] + state['gap_bottom']) / 2
+    bird_center = state['bird_y'] + BIRD_HEIGHT / 2
+    vertical_error = bird_center - gap_center  # positive if bird below center (since y increases downward)
+    # Dynamic threshold: more aggressive if falling fast
+    margin = 6 + max(0, state['bird_velocity']) * 0.9
+    # Residual adjustment
+    if residual_model and torch:
+        with torch.no_grad():
+            inp = torch.tensor([
+                bird_center / SCREEN_HEIGHT,
+                state['bird_velocity'] / 15.0,
+                gap_center / SCREEN_HEIGHT,
+                (state['gap_top']) / SCREEN_HEIGHT,
+                state['pipe_dx'] / SCREEN_WIDTH
+            ], dtype=torch.float32)
+            residual = float(residual_model(inp).item()) * 10  # scale
+            margin += residual
+    # Flap when we are too far below gap center and pipe is approaching
+    approaching = state['pipe_dx'] < 180
+    return 1 if (vertical_error > margin and approaching) else 0
+
+
+def pid_controller(state):
+    global pid_integral, pid_last_error
+    gap_center = (state['gap_top'] + state['gap_bottom']) / 2
+    bird_center = state['bird_y'] + BIRD_HEIGHT / 2
+    error = gap_center - bird_center  # want positive error => need to go down (no flap). Negative => need to rise.
+    pid_integral += error
+    pid_integral = max(-PID_MAX_I, min(PID_MAX_I, pid_integral))
+    derivative = error - pid_last_error
+    pid_last_error = error
+    control = PID_KP * error + PID_KI * pid_integral + PID_KD * derivative
+    # Map control to flap decision: if control < threshold (need lift) -> flap
+    # Additional gating: only flap when pipe approaching or descending fast
+    need_lift = control < -5 or state['bird_velocity'] > 5
+    approaching = state['pipe_dx'] < 200
+    return 1 if (need_lift and approaching) else 0
+
+
+def simulate_vertical(y, vel, action_sequence):
+    # Simple physics simulation used by planner
+    v = vel
+    pos = y
+    for a in action_sequence:
+        if a:  # flap
+            v = FLAP_POWER_SIM
+        v += GRAVITY_SIM
+        pos += v
+    return pos, v
+
+
+def planner_controller(state):
+    # Search two first-action choices (flap now vs not) and roll random continuations
+    trials = 18
+    best_choice = 0
+    best_score = float('inf')
+    gap_center = (state['gap_top'] + state['gap_bottom']) / 2
+    for first_action in [0, 1]:
+        accum = 0
+        for _ in range(trials):
+            seq = [first_action]
+            # Random future policy: heuristic suggestion
+            for t in range(1, PLAN_HORIZON):
+                if t % 10 == 0:
+                    seq.append(1 if random.random() < 0.15 else 0)
+                else:
+                    seq.append(0)
+            final_y, _ = simulate_vertical(state['bird_y'], state['bird_velocity'], seq)
+            final_center = final_y + BIRD_HEIGHT / 2
+            accum += abs(final_center - gap_center)
+        avg_err = accum / trials
+        if avg_err < best_score:
+            best_score = avg_err
+            best_choice = first_action
+    return best_choice
+
 
 def ai_decide():
-    """Main AI decision function"""
-    state = state_manager.get_state(bird_y, bird_velocity, pipe_height, PIPE_GAP, pipe_x, bird_x)
-    controller = controllers[ai_config.ai_mode]
-    
-    # Update controller parameters from GUI
-    if ai_config.ai_mode == 'heuristic':
-        heuristic_params = control_panel.get_heuristic_params()
-        controller.set_params(**heuristic_params)
-        action = controller.decide(state, BIRD_HEIGHT, GAME_WIDTH, GAME_HEIGHT)
-    elif ai_config.ai_mode == 'pid':
-        pid_params = control_panel.get_pid_params()
-        controller.set_params(**pid_params)
-        action = controller.decide(state, BIRD_HEIGHT)
-    elif ai_config.ai_mode == 'plan':
-        planner_params = control_panel.get_planner_params()
-        controller.set_params(**planner_params)
-        action = controller.decide(state, BIRD_HEIGHT)
+    state = get_state()
+    if AI_MODE == 'heuristic':
+        action = heuristic_controller(state)
+    elif AI_MODE == 'pid':
+        action = pid_controller(state)
+    elif AI_MODE == 'plan':
+        action = planner_controller(state)
     else:
         action = 0
-    
-    logger.log_sample(state, action)
+    log_sample(state, action)
+    action_history.append(action)
     return action
 
 
@@ -181,7 +306,7 @@ def draw_pipe(x, height):
     top_pipe = pygame.transform.scale(top_pipe, (PIPE_WIDTH, top_pipe_height))
     screen.blit(top_pipe, (x, 0))
 
-    bottom_pipe_height = GAME_HEIGHT - (height + PIPE_GAP)
+    bottom_pipe_height = SCREEN_HEIGHT - (height + PIPE_GAP)
     bottom_pipe = pygame.transform.scale(
         pipe_base_img, (PIPE_WIDTH, bottom_pipe_height))
     screen.blit(bottom_pipe, (x, height + PIPE_GAP))
@@ -191,9 +316,9 @@ def check_collision(bird_x, bird_y, pipe_x, pipe_height):
     bird_rect = pygame.Rect(bird_x, bird_y, BIRD_WIDTH, BIRD_HEIGHT)
     top_pipe_rect = pygame.Rect(pipe_x, 0, PIPE_WIDTH, pipe_height)
     bottom_pipe_rect = pygame.Rect(
-        pipe_x, pipe_height + PIPE_GAP, PIPE_WIDTH, GAME_HEIGHT - (pipe_height + PIPE_GAP))
-    if bird_y < 0 or bird_y + BIRD_HEIGHT > GAME_HEIGHT:
-        if die_sound and (bird_y < 0 or bird_y + BIRD_HEIGHT > GAME_HEIGHT):
+        pipe_x, pipe_height + PIPE_GAP, PIPE_WIDTH, SCREEN_HEIGHT - (pipe_height + PIPE_GAP))
+    if bird_y < 0 or bird_y + BIRD_HEIGHT > SCREEN_HEIGHT:
+        if die_sound and (bird_y < 0 or bird_y + BIRD_HEIGHT > SCREEN_HEIGHT):
             die_sound.play()
         return True
     if bird_rect.colliderect(top_pipe_rect) or bird_rect.colliderect(bottom_pipe_rect):
@@ -205,16 +330,13 @@ def check_collision(bird_x, bird_y, pipe_x, pipe_height):
 
 def reset_game():
     global bird_y, bird_velocity, pipe_x, pipe_height, score, pipe_passed, bird_frame
-    bird_y = GAME_HEIGHT // 2
+    bird_y = SCREEN_HEIGHT // 2
     bird_velocity = 0
-    pipe_x = GAME_WIDTH
-    pipe_height = random.randint(100, GAME_HEIGHT - PIPE_GAP - 100)
+    pipe_x = SCREEN_WIDTH
+    pipe_height = random.randint(100, SCREEN_HEIGHT - PIPE_GAP - 100)
     score = 0
     pipe_passed = False
     bird_frame = 0
-    # Reset PID controller state
-    if 'pid' in controllers:
-        controllers['pid'].reset()
 
 
 def render_text_with_outline(text, font, color, outline_color):
@@ -229,24 +351,12 @@ def render_text_with_outline(text, font, color, outline_color):
 
 
 def draw_ai_status():
-    status = f"AI: {'ON' if ai_config.use_ai else 'OFF'}"
-    if ai_config.use_ai:
-        status += f" ({ai_config.ai_mode})"
+    status = f"AI: {'ON' if USE_AI else 'OFF'}"
+    if USE_AI:
+        status += f" ({AI_MODE})"
     txt = render_text_with_outline(status, small_font, WHITE, BLACK)
-    rect = txt.get_rect(topright=(GAME_WIDTH - 8, 8))
+    rect = txt.get_rect(topright=(SCREEN_WIDTH - 8, 8))
     screen.blit(txt, rect)
-    
-    # Show keyboard shortcuts
-    shortcuts = [
-        "A: Toggle AI",
-        "1-3: AI Mode",
-        "Q: Quit"
-    ]
-    
-    for i, shortcut in enumerate(shortcuts):
-        shortcut_txt = render_text_with_outline(shortcut, small_font, WHITE, BLACK)
-        shortcut_rect = shortcut_txt.get_rect(topright=(GAME_WIDTH - 8, 35 + i * 15))
-        screen.blit(shortcut_txt, shortcut_rect)
 
 
 # Game loop
@@ -255,10 +365,6 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        
-        # Let GUI handle events first
-        control_panel.handle_event(event)
-        
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_SPACE:
                 if game_state == IDLE:
@@ -275,23 +381,18 @@ while running:
                 running = False
             elif event.key == pygame.K_a and game_state in (IDLE, GAME_OVER):
                 # Toggle AI on/off at idle or after game over
-                ai_config.toggle_ai()
-                print(f"AI toggled: {ai_config.use_ai}")
+                USE_AI = not USE_AI
+                print(f"AI toggled: {USE_AI}")
             elif event.key == pygame.K_1:
-                ai_config.set_mode('heuristic')
-                print('AI mode: heuristic')
+                AI_MODE = 'heuristic'; print('AI mode: heuristic')
             elif event.key == pygame.K_2:
-                ai_config.set_mode('pid')
-                print('AI mode: pid')
+                AI_MODE = 'pid'; print('AI mode: pid')
             elif event.key == pygame.K_3:
-                ai_config.set_mode('plan')
-                print('AI mode: plan')
+                AI_MODE = 'plan'; print('AI mode: plan')
 
     if game_state == IDLE:
-        # Clear screen and draw background for game area
-        screen.fill(BLACK)
         screen.blit(background, (0, 0))
-        bird_y = GAME_HEIGHT // 2 + 20 * \
+        bird_y = SCREEN_HEIGHT // 2 + 20 * \
             pygame.math.Vector2(0, 1).rotate(pygame.time.get_ticks() / 100).y
         draw_bird(bird_x, bird_y, int(bird_frame))
         bird_animation_counter += bird_animation_speed
@@ -301,12 +402,12 @@ while running:
         start_text = render_text_with_outline(
             "Press SPACE to Start", font, WHITE, BLACK)
         start_rect = start_text.get_rect(
-            center=(GAME_WIDTH // 2, GAME_HEIGHT // 2))
+            center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
         screen.blit(start_text, start_rect)
 
     elif game_state == PLAYING:
         # AI control injection
-        if ai_config.use_ai:
+        if USE_AI:
             action = ai_decide()
             if action:
                 bird_velocity = FLAP_POWER
@@ -322,8 +423,8 @@ while running:
             bird_frame = (bird_frame + 1) % len(bird_frames)
 
         if pipe_x < -PIPE_WIDTH:
-            pipe_x = GAME_WIDTH
-            pipe_height = random.randint(100, GAME_HEIGHT - PIPE_GAP - 100)
+            pipe_x = SCREEN_WIDTH
+            pipe_height = random.randint(100, SCREEN_HEIGHT - PIPE_GAP - 100)
             pipe_passed = False
 
         if check_collision(bird_x, bird_y, pipe_x, pipe_height):
@@ -342,8 +443,6 @@ while running:
                 if point_sound:
                     point_sound.play()
 
-        # Clear screen and draw background for game area
-        screen.fill(BLACK)
         screen.blit(background, (0, 0))
         draw_pipe(pipe_x, pipe_height)
         draw_bird(bird_x, bird_y, int(bird_frame))
@@ -351,8 +450,6 @@ while running:
         screen.blit(score_text, (10, 10))
 
     elif game_state == GAME_OVER:
-        # Clear screen and draw background for game area
-        screen.fill(BLACK)
         screen.blit(background, (0, 0))
         draw_pipe(pipe_x, pipe_height)
         draw_bird(bird_x, bird_y, int(bird_frame))
@@ -361,21 +458,15 @@ while running:
         restart_text = render_text_with_outline(
             "Press SPACE to Restart", font, WHITE, BLACK)
         game_over_rect = game_over_text.get_rect(
-            center=(GAME_WIDTH // 2, GAME_HEIGHT // 2 - 20))
+            center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 20))
         restart_rect = restart_text.get_rect(
-            center=(GAME_WIDTH // 2, GAME_HEIGHT // 2 + 20))
+            center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 20))
         screen.blit(game_over_text, game_over_rect)
         screen.blit(restart_text, restart_rect)
         score_text = font.render(f"Score: {score}", True, WHITE)
         screen.blit(score_text, (10, 10))
     # Draw AI status overlay
     draw_ai_status()
-    
-    # Draw divider line between game and GUI
-    pygame.draw.line(screen, WHITE, (GAME_WIDTH, 0), (GAME_WIDTH, GAME_HEIGHT), 2)
-    
-    # Draw GUI control panel
-    control_panel.draw(screen)
 
     pygame.display.flip()
     clock.tick(60)

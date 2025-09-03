@@ -33,6 +33,19 @@ class HeuristicController:
     
     def __init__(self, residual_model=None):
         self.residual_model = residual_model
+        # Default parameters (can be overridden by GUI)
+        self.margin_base = 6.0
+        self.velocity_factor = 0.9
+        self.approach_distance = 180
+    
+    def set_params(self, margin_base=None, velocity_factor=None, approach_distance=None):
+        """Update parameters from GUI"""
+        if margin_base is not None:
+            self.margin_base = margin_base
+        if velocity_factor is not None:
+            self.velocity_factor = velocity_factor
+        if approach_distance is not None:
+            self.approach_distance = approach_distance
     
     def decide(self, state, bird_height, screen_width, screen_height):
         gap_center = (state['gap_top'] + state['gap_bottom']) / 2
@@ -40,7 +53,7 @@ class HeuristicController:
         vertical_error = bird_center - gap_center
         
         # Dynamic threshold: more aggressive if falling fast
-        margin = 6 + max(0, state['bird_velocity']) * 0.9
+        margin = self.margin_base + max(0, state['bird_velocity']) * self.velocity_factor
         
         # Residual adjustment from neural network
         if self.residual_model and torch:
@@ -56,7 +69,7 @@ class HeuristicController:
                 margin += residual
         
         # Flap when too far below gap center and pipe is approaching
-        approaching = state['pipe_dx'] < 180
+        approaching = state['pipe_dx'] < self.approach_distance
         return 1 if (vertical_error > margin and approaching) else 0
 
 
@@ -70,6 +83,19 @@ class PIDController:
         self.max_integral = max_integral
         self.integral = 0.0
         self.last_error = 0.0
+        # Additional parameters for GUI control
+        self.control_threshold = 5
+        self.velocity_threshold = 5
+        self.approach_distance = 200
+    
+    def set_params(self, control_threshold=None, velocity_threshold=None, approach_distance=None):
+        """Update parameters from GUI"""
+        if control_threshold is not None:
+            self.control_threshold = control_threshold
+        if velocity_threshold is not None:
+            self.velocity_threshold = velocity_threshold
+        if approach_distance is not None:
+            self.approach_distance = approach_distance
     
     def decide(self, state, bird_height):
         gap_center = (state['gap_top'] + state['gap_bottom']) / 2
@@ -83,9 +109,9 @@ class PIDController:
         
         control = self.kp * error + self.ki * self.integral + self.kd * derivative
         
-        # Map control to flap decision
-        need_lift = control < -5 or state['bird_velocity'] > 5
-        approaching = state['pipe_dx'] < 200
+        # Map control to flap decision (using GUI parameters)
+        need_lift = control < -self.control_threshold or state['bird_velocity'] > self.velocity_threshold
+        approaching = state['pipe_dx'] < self.approach_distance
         return 1 if (need_lift and approaching) else 0
     
     def reset(self):
@@ -102,6 +128,13 @@ class PlannerController:
         self.trials = trials
         self.gravity = gravity
         self.flap_power = flap_power
+        # Additional parameter for GUI control
+        self.flap_probability = 0.15
+    
+    def set_params(self, flap_probability=None):
+        """Update parameters from GUI"""
+        if flap_probability is not None:
+            self.flap_probability = flap_probability
     
     def simulate_vertical(self, y, vel, action_sequence):
         """Simple physics simulation"""
@@ -124,10 +157,10 @@ class PlannerController:
             accum = 0
             for _ in range(self.trials):
                 seq = [first_action]
-                # Random future policy with occasional flaps
+                # Random future policy with occasional flaps (using GUI parameter)
                 for t in range(1, self.horizon):
                     if t % 10 == 0:
-                        seq.append(1 if random.random() < 0.15 else 0)
+                        seq.append(1 if random.random() < self.flap_probability else 0)
                     else:
                         seq.append(0)
                 
