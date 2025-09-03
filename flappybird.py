@@ -13,7 +13,7 @@ GAME_WIDTH = 400
 GAME_HEIGHT = 600
 GUI_WIDTH = 320
 SCREEN_WIDTH = GAME_WIDTH + GUI_WIDTH
-SCREEN_HEIGHT = GAME_HEIGHT
+SCREEN_HEIGHT = max(GAME_HEIGHT, 650)  # Increased height for better UI spacing
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Flappy Bird with AI Controls")
 
@@ -127,6 +127,10 @@ PLAYING = 1
 GAME_OVER = 2
 game_state = IDLE
 
+# Auto-replay timer
+auto_replay_timer = 0
+AUTO_REPLAY_DELAY = 120  # 2 seconds at 60 FPS
+
 # -------------------- AI System Setup --------------------
 ai_config = AIConfig()
 state_manager = GameStateManager()
@@ -142,7 +146,7 @@ controllers = {
 
 # Initialize GUI Control Panel (positioned on the right side)
 control_panel = ControlPanel(
-    x=GAME_WIDTH + 10, y=10, width=GUI_WIDTH - 20, height=GAME_HEIGHT - 20,
+    x=GAME_WIDTH + 10, y=10, width=GUI_WIDTH - 20, height=SCREEN_HEIGHT - 20,
     controllers=controllers, ai_config=ai_config
 )
 
@@ -204,7 +208,7 @@ def check_collision(bird_x, bird_y, pipe_x, pipe_height):
 
 
 def reset_game():
-    global bird_y, bird_velocity, pipe_x, pipe_height, score, pipe_passed, bird_frame
+    global bird_y, bird_velocity, pipe_x, pipe_height, score, pipe_passed, bird_frame, auto_replay_timer
     bird_y = GAME_HEIGHT // 2
     bird_velocity = 0
     pipe_x = GAME_WIDTH
@@ -212,6 +216,7 @@ def reset_game():
     score = 0
     pipe_passed = False
     bird_frame = 0
+    auto_replay_timer = 0
     # Reset PID controller state
     if 'pid' in controllers:
         controllers['pid'].reset()
@@ -231,7 +236,7 @@ def render_text_with_outline(text, font, color, outline_color):
 def draw_ai_status():
     status = f"AI: {'ON' if ai_config.use_ai else 'OFF'}"
     if ai_config.use_ai:
-        status += f" ({ai_config.ai_mode})"
+        status += f" ({ai_config.ai_mode}) - AUTO"
     txt = render_text_with_outline(status, small_font, WHITE, BLACK)
     rect = txt.get_rect(topright=(GAME_WIDTH - 8, 8))
     screen.blit(txt, rect)
@@ -240,6 +245,7 @@ def draw_ai_status():
     shortcuts = [
         "A: Toggle AI",
         "1-3: AI Mode",
+        "SPACE: Manual Control",
         "Q: Quit"
     ]
     
@@ -277,32 +283,60 @@ while running:
                 # Toggle AI on/off at idle or after game over
                 ai_config.toggle_ai()
                 print(f"AI toggled: {ai_config.use_ai}")
+                # Auto-start game if AI is enabled and we're in IDLE state
+                if ai_config.use_ai and game_state == IDLE:
+                    reset_game()
+                    game_state = PLAYING
             elif event.key == pygame.K_1:
                 ai_config.set_mode('heuristic')
                 print('AI mode: heuristic')
+                # Auto-start game if AI is enabled and we're in IDLE state
+                if ai_config.use_ai and game_state == IDLE:
+                    reset_game()
+                    game_state = PLAYING
             elif event.key == pygame.K_2:
                 ai_config.set_mode('pid')
                 print('AI mode: pid')
+                # Auto-start game if AI is enabled and we're in IDLE state
+                if ai_config.use_ai and game_state == IDLE:
+                    reset_game()
+                    game_state = PLAYING
             elif event.key == pygame.K_3:
                 ai_config.set_mode('plan')
                 print('AI mode: plan')
+                # Auto-start game if AI is enabled and we're in IDLE state
+                if ai_config.use_ai and game_state == IDLE:
+                    reset_game()
+                    game_state = PLAYING
 
     if game_state == IDLE:
-        # Clear screen and draw background for game area
-        screen.fill(BLACK)
-        screen.blit(background, (0, 0))
-        bird_y = GAME_HEIGHT // 2 + 20 * \
-            pygame.math.Vector2(0, 1).rotate(pygame.time.get_ticks() / 100).y
-        draw_bird(bird_x, bird_y, int(bird_frame))
-        bird_animation_counter += bird_animation_speed
-        if bird_animation_counter >= 1:
-            bird_animation_counter = 0
-            bird_frame = (bird_frame + 1) % len(bird_frames)
-        start_text = render_text_with_outline(
-            "Press SPACE to Start", font, WHITE, BLACK)
-        start_rect = start_text.get_rect(
-            center=(GAME_WIDTH // 2, GAME_HEIGHT // 2))
-        screen.blit(start_text, start_rect)
+        # Auto-start game if AI is enabled
+        if ai_config.use_ai:
+            reset_game()
+            game_state = PLAYING
+        else:
+            # Clear screen and draw background for game area
+            screen.fill(BLACK)
+            screen.blit(background, (0, 0))
+            bird_y = GAME_HEIGHT // 2 + 20 * \
+                pygame.math.Vector2(0, 1).rotate(pygame.time.get_ticks() / 100).y
+            draw_bird(bird_x, bird_y, int(bird_frame))
+            bird_animation_counter += bird_animation_speed
+            if bird_animation_counter >= 1:
+                bird_animation_counter = 0
+                bird_frame = (bird_frame + 1) % len(bird_frames)
+            start_text = render_text_with_outline(
+                "Press SPACE to Start (Manual Mode)", font, WHITE, BLACK)
+            start_rect = start_text.get_rect(
+                center=(GAME_WIDTH // 2, GAME_HEIGHT // 2))
+            screen.blit(start_text, start_rect)
+            
+            # Show AI instruction
+            ai_text = render_text_with_outline(
+                "Press A to enable AI Auto-Play", small_font, WHITE, BLACK)
+            ai_rect = ai_text.get_rect(
+                center=(GAME_WIDTH // 2, GAME_HEIGHT // 2 + 30))
+            screen.blit(ai_text, ai_rect)
 
     elif game_state == PLAYING:
         # AI control injection
@@ -328,6 +362,7 @@ while running:
 
         if check_collision(bird_x, bird_y, pipe_x, pipe_height):
             game_state = GAME_OVER
+            auto_replay_timer = 0  # Reset timer when game over
 
         bird_right_x = bird_x + BIRD_WIDTH
         pipe_left_x = pipe_x
@@ -351,6 +386,13 @@ while running:
         screen.blit(score_text, (10, 10))
 
     elif game_state == GAME_OVER:
+        # Handle auto-replay for AI mode
+        if ai_config.use_ai and control_panel.is_auto_replay_enabled():
+            auto_replay_timer += 1
+            if auto_replay_timer >= AUTO_REPLAY_DELAY:
+                reset_game()
+                game_state = PLAYING
+        
         # Clear screen and draw background for game area
         screen.fill(BLACK)
         screen.blit(background, (0, 0))
@@ -358,8 +400,16 @@ while running:
         draw_bird(bird_x, bird_y, int(bird_frame))
         game_over_text = render_text_with_outline(
             "Game Over!", font, WHITE, BLACK)
-        restart_text = render_text_with_outline(
-            "Press SPACE to Restart", font, WHITE, BLACK)
+        
+        # Show different restart instructions based on auto-replay status
+        if ai_config.use_ai and control_panel.is_auto_replay_enabled():
+            countdown = (AUTO_REPLAY_DELAY - auto_replay_timer) // 60 + 1
+            restart_text = render_text_with_outline(
+                f"Auto-restart in {countdown}s", font, WHITE, BLACK)
+        else:
+            restart_text = render_text_with_outline(
+                "Press SPACE to Restart", font, WHITE, BLACK)
+        
         game_over_rect = game_over_text.get_rect(
             center=(GAME_WIDTH // 2, GAME_HEIGHT // 2 - 20))
         restart_rect = restart_text.get_rect(
@@ -372,7 +422,7 @@ while running:
     draw_ai_status()
     
     # Draw divider line between game and GUI
-    pygame.draw.line(screen, WHITE, (GAME_WIDTH, 0), (GAME_WIDTH, GAME_HEIGHT), 2)
+    pygame.draw.line(screen, WHITE, (GAME_WIDTH, 0), (GAME_WIDTH, SCREEN_HEIGHT), 2)
     
     # Draw GUI control panel
     control_panel.draw(screen)

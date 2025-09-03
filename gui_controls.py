@@ -142,6 +142,7 @@ class ControlPanel:
         self.controllers = controllers
         self.ai_config = ai_config
         self.visible = True  # Always visible now
+        self.auto_replay = False  # Auto-replay feature
         self.font = pygame.font.SysFont('Arial', 12)
         self.title_font = pygame.font.SysFont('Arial', 14, bold=True)
         
@@ -156,10 +157,16 @@ class ControlPanel:
     
     def _create_widgets(self):
         """Create all sliders and buttons"""
-        start_y = self.rect.y + 30
+        start_y = self.rect.y + 40
         slider_height = 20
-        spacing = 35
+        spacing = 40  # Increased from 35 for better vertical spacing
         slider_width = self.rect.width - 20
+        
+        # Auto-replay toggle button for AI mode
+        self.buttons['auto_replay'] = Button(
+            self.rect.x + 10, self.rect.y + 5, 120, 25, "Auto-Replay: OFF",
+            self._toggle_auto_replay
+        )
         
         # Heuristic Controller sliders
         current_y = start_y
@@ -179,7 +186,7 @@ class ControlPanel:
             self.rect.x + 10, current_y, slider_width, slider_height,
             50, 300, 180, "Approach Distance", 0
         )
-        current_y += spacing + 10
+        current_y += spacing + 15  # Extra space between sections
         
         # PID Controller sliders
         self.sliders['pid_kp'] = Slider(
@@ -216,7 +223,7 @@ class ControlPanel:
             self.rect.x + 10, current_y, slider_width, slider_height,
             50, 300, 200, "Approach Distance", 0
         )
-        current_y += spacing + 10
+        current_y += spacing + 15  # Extra space between sections
         
         # Planner Controller sliders
         self.sliders['planner_horizon'] = Slider(
@@ -237,7 +244,7 @@ class ControlPanel:
         )
         
         # Reset buttons
-        reset_y = current_y + spacing + 10
+        reset_y = current_y + spacing + 15
         button_width = (slider_width - 20) // 3
         self.buttons['reset_heuristic'] = Button(
             self.rect.x + 10, reset_y, button_width, 25, "Reset H",
@@ -252,10 +259,10 @@ class ControlPanel:
             lambda: self._reset_controller_params('planner')
         )
     
-    def _toggle_visibility(self):
-        """Toggle panel visibility"""
-        self.visible = not self.visible
-        self.buttons['toggle'].text = "Hide" if self.visible else "Show"
+    def _toggle_auto_replay(self):
+        """Toggle auto-replay functionality"""
+        self.auto_replay = not self.auto_replay
+        self.buttons['auto_replay'].text = f"Auto-Replay: {'ON' if self.auto_replay else 'OFF'}"
     
     def _reset_controller_params(self, controller_type):
         """Reset parameters for a specific controller type"""
@@ -314,11 +321,11 @@ class ControlPanel:
         screen.blit(title_surface, (self.rect.x + 10, self.rect.y + 5))
         
         # Section headers
-        y_offset = 35
+        y_offset = 45
         sections = [
             ("HEURISTIC", 0),
-            ("PID", 3 * 35 + 10),
-            ("PLANNER", 9 * 35 + 20)
+            ("PID", 3 * 40 + 15),  # Updated spacing
+            ("PLANNER", 9 * 40 + 30)  # Updated spacing
         ]
         
         for section_name, offset in sections:
@@ -373,3 +380,7 @@ class ControlPanel:
         return {
             'flap_probability': self.sliders['planner_flap_probability'].val
         }
+    
+    def is_auto_replay_enabled(self):
+        """Check if auto-replay is enabled"""
+        return self.auto_replay
