@@ -168,6 +168,12 @@ class ControlPanel:
             self._toggle_auto_replay
         )
         
+        # Data logging toggle button
+        self.buttons['data_logging'] = Button(
+            self.rect.x + 140, self.rect.y + 5, 120, 25, "Data Log: ON",
+            self._toggle_data_logging
+        )
+        
         # Heuristic Controller sliders
         current_y = start_y
         self.sliders['heuristic_margin_base'] = Slider(
@@ -242,27 +248,57 @@ class ControlPanel:
             self.rect.x + 10, current_y, slider_width, slider_height,
             0.0, 0.5, 0.15, "Flap Probability", 3
         )
+        current_y += spacing + 15  # Extra space between sections
+        
+        # Imitation Controller section (no sliders, just info display)
+        # We'll handle this in the draw method
         
         # Reset buttons
-        reset_y = current_y + spacing + 15
-        button_width = (slider_width - 20) // 3
+        reset_y = current_y + spacing + 45  # More space for imitation section
+        button_width = (slider_width - 30) // 4  # 4 buttons now
         self.buttons['reset_heuristic'] = Button(
             self.rect.x + 10, reset_y, button_width, 25, "Reset H",
             lambda: self._reset_controller_params('heuristic')
         )
         self.buttons['reset_pid'] = Button(
-            self.rect.x + 20 + button_width, reset_y, button_width, 25, "Reset P",
+            self.rect.x + 15 + button_width, reset_y, button_width, 25, "Reset P",
             lambda: self._reset_controller_params('pid')
         )
         self.buttons['reset_planner'] = Button(
-            self.rect.x + 30 + button_width * 2, reset_y, button_width, 25, "Reset Pl",
+            self.rect.x + 20 + button_width * 2, reset_y, button_width, 25, "Reset Pl",
             lambda: self._reset_controller_params('planner')
+        )
+        self.buttons['reset_imitation'] = Button(
+            self.rect.x + 25 + button_width * 3, reset_y, button_width, 25, "Info I",
+            lambda: self._show_imitation_info()
         )
     
     def _toggle_auto_replay(self):
         """Toggle auto-replay functionality"""
         self.auto_replay = not self.auto_replay
         self.buttons['auto_replay'].text = f"Auto-Replay: {'ON' if self.auto_replay else 'OFF'}"
+    
+    def _toggle_data_logging(self):
+        """Toggle data logging functionality"""
+        self.ai_config.data_log = not self.ai_config.data_log
+        self.buttons['data_logging'].text = f"Data Log: {'ON' if self.ai_config.data_log else 'OFF'}"
+        print(f"Data logging {'enabled' if self.ai_config.data_log else 'disabled'}")
+    
+    def _show_imitation_info(self):
+        """Show information about the imitation controller"""
+        print("=== IMITATION CONTROLLER INFO ===")
+        if 'imitation' in self.controllers:
+            controller = self.controllers['imitation']
+            print(f"Model loaded: {controller.model_loaded}")
+            if controller.model_loaded:
+                print("Neural Network: Multi-layer perceptron")
+                print("Architecture: 5 inputs -> 64 -> 32 -> 16 -> 1 output")
+                print("Training: Expert demonstrations from other AI controllers")
+                print("Activation: Sigmoid output for flap probability")
+            else:
+                print("Model not loaded - using fallback heuristic")
+                print("To train: Run 'python train_imitation_model.py'")
+        print("=================================")
     
     def _reset_controller_params(self, controller_type):
         """Reset parameters for a specific controller type"""
@@ -281,6 +317,9 @@ class ControlPanel:
             self.sliders['planner_horizon'].val = 40
             self.sliders['planner_trials'].val = 18
             self.sliders['planner_flap_probability'].val = 0.15
+        elif controller_type == 'imitation':
+            # No parameters to reset for neural network
+            print("Imitation controller has no tunable parameters")
     
     def handle_event(self, event):
         """Handle events for all widgets"""
@@ -325,7 +364,8 @@ class ControlPanel:
         sections = [
             ("HEURISTIC", 0),
             ("PID", 3 * 40 + 15),  # Updated spacing
-            ("PLANNER", 9 * 40 + 30)  # Updated spacing
+            ("PLANNER", 9 * 40 + 30),  # Updated spacing
+            ("IMITATION", 12 * 40 + 45)  # New section
         ]
         
         for section_name, offset in sections:
@@ -347,6 +387,10 @@ class ControlPanel:
         # Draw buttons
         for button in self.buttons.values():
             button.draw(screen, self.font)
+        
+        # Draw imitation controller info when active
+        if self.ai_config.ai_mode == 'imitation':
+            self._draw_imitation_info(screen)
     
     def _get_relevant_sliders(self):
         """Get slider names relevant to current AI mode"""
@@ -357,7 +401,38 @@ class ControlPanel:
             return ['pid_kp', 'pid_ki', 'pid_kd', 'pid_control_threshold', 'pid_velocity_threshold', 'pid_approach_distance']
         elif mode == 'plan':
             return ['planner_horizon', 'planner_trials', 'planner_flap_probability']
+        elif mode == 'imitation':
+            return []  # No sliders for neural network
         return []
+    
+    def _draw_imitation_info(self, screen):
+        """Draw information about imitation controller when active"""
+        info_y = self.rect.y + 45 + 12 * 40 + 60  # Below IMITATION header
+        
+        if 'imitation' in self.controllers:
+            controller = self.controllers['imitation']
+            status_color = (100, 255, 100) if controller.model_loaded else (255, 100, 100)
+            
+            # Model status
+            status_text = "✓ Model Loaded" if controller.model_loaded else "✗ Model Missing"
+            status_surface = self.font.render(status_text, True, status_color)
+            screen.blit(status_surface, (self.rect.x + 10, info_y))
+            
+            # Architecture info
+            arch_text = "5→64→32→16→1 Neural Net"
+            arch_surface = self.font.render(arch_text, True, self.text_color)
+            screen.blit(arch_surface, (self.rect.x + 10, info_y + 20))
+            
+            # Training info
+            if controller.model_loaded:
+                train_text = "Trained on Expert Data"
+                train_color = (150, 255, 150)
+            else:
+                train_text = "Run train_imitation_model.py"
+                train_color = (255, 150, 150)
+            
+            train_surface = self.font.render(train_text, True, train_color)
+            screen.blit(train_surface, (self.rect.x + 10, info_y + 40))
     
     def get_heuristic_params(self):
         """Get current heuristic parameters"""

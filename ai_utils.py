@@ -27,12 +27,13 @@ class GameStateManager:
 class ImitationLogger:
     """Logs state-action pairs for supervised learning"""
     
-    def __init__(self, log_path='imitation_data.csv', enabled=True):
+    def __init__(self, log_path='imitation_data.csv', ai_config=None):
         self.log_path = log_path
-        self.enabled = enabled
+        self.ai_config = ai_config  # Reference to config for dynamic checking
         self.action_history = deque(maxlen=10)
         
-        if self.enabled and not os.path.isfile(self.log_path):
+        # Create log file if it doesn't exist (regardless of current logging state)
+        if not os.path.isfile(self.log_path):
             self._create_log_file()
     
     def _create_log_file(self):
@@ -42,8 +43,9 @@ class ImitationLogger:
             writer.writerow(['bird_y', 'bird_velocity', 'gap_top', 'gap_bottom', 'pipe_dx', 'action'])
     
     def log_sample(self, state, action):
-        """Log a state-action pair"""
-        if not self.enabled:
+        """Log a state-action pair (only if logging is enabled)"""
+        # Check if logging is enabled dynamically
+        if not (self.ai_config and self.ai_config.data_log):
             return
         
         self.action_history.append(action)
@@ -70,7 +72,7 @@ class AIConfig:
     def __init__(self):
         # AI Control
         self.use_ai = True
-        self.ai_mode = 'heuristic'  # 'heuristic' | 'pid' | 'plan'
+        self.ai_mode = 'heuristic'  # 'heuristic' | 'pid' | 'plan' | 'imitation'
         
         # Data Logging
         self.data_log = True
@@ -99,7 +101,7 @@ class AIConfig:
     
     def set_mode(self, mode):
         """Set AI mode"""
-        valid_modes = ['heuristic', 'pid', 'plan']
+        valid_modes = ['heuristic', 'pid', 'plan', 'imitation']
         if mode in valid_modes:
             self.ai_mode = mode
             return True

@@ -129,19 +129,20 @@ game_state = IDLE
 
 # Auto-replay timer
 auto_replay_timer = 0
-AUTO_REPLAY_DELAY = 120  # 2 seconds at 60 FPS
+AUTO_REPLAY_DELAY = 30  # 0.5 seconds at 60 FPS
 
 # -------------------- AI System Setup --------------------
 ai_config = AIConfig()
 state_manager = GameStateManager()
-logger = ImitationLogger(ai_config.log_path, ai_config.data_log)
+logger = ImitationLogger(ai_config.log_path, ai_config)  # Pass config instead of just enabled flag
 residual_model = load_residual_model(ai_config.residual_model_path)
 
 # Initialize AI controllers
 controllers = {
     'heuristic': create_controller('heuristic', residual_model=residual_model),
     'pid': create_controller('pid', **ai_config.pid_params),
-    'plan': create_controller('plan', **ai_config.planner_params, gravity=GRAVITY, flap_power=FLAP_POWER)
+    'plan': create_controller('plan', **ai_config.planner_params, gravity=GRAVITY, flap_power=FLAP_POWER),
+    'imitation': create_controller('imitation')
 }
 
 # Initialize GUI Control Panel (positioned on the right side)
@@ -167,6 +168,8 @@ def ai_decide():
     elif ai_config.ai_mode == 'plan':
         planner_params = control_panel.get_planner_params()
         controller.set_params(**planner_params)
+        action = controller.decide(state, BIRD_HEIGHT)
+    elif ai_config.ai_mode == 'imitation':
         action = controller.decide(state, BIRD_HEIGHT)
     else:
         action = 0
@@ -241,17 +244,25 @@ def draw_ai_status():
     rect = txt.get_rect(topright=(GAME_WIDTH - 8, 8))
     screen.blit(txt, rect)
     
+    # Show data logging status
+    log_status = f"Data Log: {'ON' if ai_config.data_log else 'OFF'}"
+    log_color = (100, 255, 100) if ai_config.data_log else (255, 100, 100)  # Green if on, red if off
+    log_txt = render_text_with_outline(log_status, small_font, log_color, BLACK)
+    log_rect = log_txt.get_rect(topright=(GAME_WIDTH - 8, 25))
+    screen.blit(log_txt, log_rect)
+    
     # Show keyboard shortcuts
     shortcuts = [
         "A: Toggle AI",
-        "1-3: AI Mode",
+        "1-4: AI Mode",
+        "D: Toggle Data Log",
         "SPACE: Manual Control",
         "Q: Quit"
     ]
     
     for i, shortcut in enumerate(shortcuts):
         shortcut_txt = render_text_with_outline(shortcut, small_font, WHITE, BLACK)
-        shortcut_rect = shortcut_txt.get_rect(topright=(GAME_WIDTH - 8, 35 + i * 15))
+        shortcut_rect = shortcut_txt.get_rect(topright=(GAME_WIDTH - 8, 50 + i * 15))  # Adjusted for data log status
         screen.blit(shortcut_txt, shortcut_rect)
 
 
@@ -308,6 +319,20 @@ while running:
                 if ai_config.use_ai and game_state == IDLE:
                     reset_game()
                     game_state = PLAYING
+            elif event.key == pygame.K_4:
+                ai_config.set_mode('imitation')
+                print('AI mode: imitation')
+                # Auto-start game if AI is enabled and we're in IDLE state
+                if ai_config.use_ai and game_state == IDLE:
+                    reset_game()
+                    game_state = PLAYING
+            elif event.key == pygame.K_d and game_state in (IDLE, GAME_OVER):
+                # Toggle data logging
+                ai_config.data_log = not ai_config.data_log
+                print(f"Data logging {'enabled' if ai_config.data_log else 'disabled'}")
+                # Update the GUI button text if it exists
+                if hasattr(control_panel, 'buttons') and 'data_logging' in control_panel.buttons:
+                    control_panel.buttons['data_logging'].text = f"Data Log: {'ON' if ai_config.data_log else 'OFF'}"
 
     if game_state == IDLE:
         # Auto-start game if AI is enabled

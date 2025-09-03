@@ -1,12 +1,14 @@
 """
 AI Controllers for Flappy Bird
-Contains heuristic, PID, and planner-based control algorithms
+Contains heuristic, PID, planner-based, and imitation learning control algorithms
 """
 import random
 import math
+import os
 try:
     import torch
     import torch.nn as nn
+    import pickle
 except ImportError:
     torch = None
     nn = object
@@ -176,6 +178,93 @@ class PlannerController:
         return best_choice
 
 
+class ImitationController:
+    """Neural network controller trained on expert demonstrations"""
+    
+    def __init__(self, model_path='flappy_bird_imitation_model.pth'):
+        self.model = None
+        self.scaler = None
+        self.model_loaded = False
+        
+        if torch and os.path.exists(model_path):
+            try:
+                self._load_model(model_path)
+                print(f"Imitation model loaded from {model_path}")
+            except Exception as e:
+                print(f"Failed to load imitation model: {e}")
+        else:
+            print(f"Imitation model not found at {model_path}")
+    
+    def _load_model(self, model_path):
+        """Load trained neural network model"""
+        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # Recreate model architecture
+        self.model = ImitationNet()
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.eval()
+        
+        # Load scaler for input normalization
+        self.scaler = checkpoint['scaler']
+        self.model_loaded = True
+    
+    def decide(self, state, bird_height):
+        """Make decision using trained neural network"""
+        if not self.model_loaded:
+            # Fallback to simple heuristic if model not loaded
+            gap_center = (state['gap_top'] + state['gap_bottom']) / 2
+            bird_center = state['bird_y'] + bird_height / 2
+            return 1 if bird_center > gap_center + 20 else 0
+        
+        # Prepare input features
+        features = [
+            state['bird_y'],
+            state['bird_velocity'],
+            state['gap_top'],
+            state['gap_bottom'],
+            state['pipe_dx']
+        ]
+        
+        # Normalize features using saved scaler
+        features_normalized = self.scaler.transform([features])[0]
+        
+        # Make prediction
+        with torch.no_grad():
+            inputs = torch.FloatTensor(features_normalized)
+            flap_probability = self.model(inputs).item()
+        
+        # Decision threshold
+        return 1 if flap_probability > 0.5 else 0
+
+
+class ImitationNet(nn.Module if torch else object):
+    """Neural network architecture for imitation learning"""
+    
+    def __init__(self, input_size=5, hidden_sizes=[64, 32, 16]):
+        if not torch:
+            return
+        super().__init__()
+        
+        layers = []
+        prev_size = input_size
+        
+        for hidden_size in hidden_sizes:
+            layers.extend([
+                nn.Linear(prev_size, hidden_size),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            ])
+            prev_size = hidden_size
+        
+        layers.append(nn.Linear(prev_size, 1))
+        layers.append(nn.Sigmoid())
+        
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return self.network(x)
+
+
 # Controller factory
 def create_controller(mode, **kwargs):
     """Factory function to create AI controllers"""
@@ -195,5 +284,7 @@ def create_controller(mode, **kwargs):
             gravity=kwargs.get('gravity', 0.5),
             flap_power=kwargs.get('flap_power', -10)
         )
+    elif mode == 'imitation':
+        return ImitationController(kwargs.get('model_path', 'flappy_bird_imitation_model.pth'))
     else:
         raise ValueError(f"Unknown AI mode: {mode}")
